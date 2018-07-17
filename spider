@@ -1,0 +1,264 @@
+import threading
+import urllib.request
+from bs4 import BeautifulSoup
+import re
+import socket
+
+# 设置超时时间
+socket.setdefaulttimeout(10)
+
+
+def get_html_data(str_url):
+    try:
+        data = urllib.request.urlopen(str_url).read()
+        return data
+    except:
+        print('i get the error')
+        data = urllib.request.urlopen(str_url).read()
+        return data
+
+
+def get_data_on_match(data, name, att, match):
+    soup = BeautifulSoup(data, "html.parser")
+    result = soup.find_all(name, att)
+    if match != "":
+        re_pat = re.compile(match)
+        list = re_pat.findall(str(result))
+        return list
+    return result
+
+
+# 保存小说信息
+class ListBookInfo:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.nLsBookCnt = 0
+        self.lsBookInfo = []
+
+    def add_book_info(self, str_book_name, str_book_url):
+        self.lock.acquire()
+        obj = [str_book_name, str_book_url]
+        self.lsBookInfo.append(obj)
+        self.nLsBookCnt += 1
+        self.lock.release()
+
+    def get_head_book_info(self):
+        self.lock.acquire()
+        if self.nLsBookCnt > 0:
+            bookInfo = self.lsBookInfo[0]
+            del self.lsBookInfo[0]
+            self.nLsBookCnt -= 1
+            self.lock.release()
+            return bookInfo
+        else:
+            self.lock.release()
+            return 0
+
+    def get_size(self):
+        self.lock.acquire()
+        nSize = self.nLsBookCnt
+        self.lock.release()
+        return nSize
+
+    def clear_ls_book(self):
+        self.lock.acquire()
+        self.lsBookInfo.clear()
+        self.nLsBookCnt = 0
+        self.lock.release()
+
+
+# 保存小说名、小说章节信息（章节名、章节URL）
+class BookPageInfo:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.nBookPageCnt = 0
+        self.lsBookPageInfo = []
+
+    def add_book_page_info(self, str_book_name, ls_book_page_url):
+        self.lock.acquire()
+        obj = [str_book_name, ls_book_page_url]
+        self.lsBookPageInfo.append(obj)
+        self.nBookPageCnt += 1
+        self.lock.release()
+
+    def get_head_book_page_info(self):
+        self.lock.acquire()
+        if self.nBookPageCnt > 0:
+            bookInfo = self.lsBookPageInfo[0]
+            del self.lsBookPageInfo[0]
+            self.nBookPageCnt -= 1
+            self.lock.release()
+            return bookInfo
+        else:
+            self.lock.release()
+            return 0
+
+    def get_size(self):
+        self.lock.acquire()
+        nSize = self.nBookPageCnt
+        self.lock.release()
+        return nSize
+
+    def clear_ls_book_page(self):
+        self.lock.acquire()
+        self.lsBookPageInfo.clear()
+        self.nBookPageCnt = 0
+        self.lock.release()
+
+
+def get_article_type(data):
+    soup = BeautifulSoup(data)
+    data_ul = soup.find_all("ul", "channel-nav-list")
+    print(data_ul)
+    re_pat = re.compile('\<a href=\"(.*?)\"\>(.*)\<\/a\>')
+    list = re_pat.findall(str(data_ul))
+    print(list)
+    for i in list:
+        print("%s-->%s" % (i[1], i[0]))
+    return list
+
+
+def get_article(str_url):
+    data = get_html_data(str_url)
+    print(data)
+    ll = get_data_on_match(data, "ul", "seeWell cf", "\<li\>(.*?)href=\"(.*?)\"(.*?)\<\/li\>")
+    list = []
+    for i in ll:
+        obj = []
+        listReData = get_data_on_match(get_html_data(i[1]), "section", "main b-detail", "(.*?)href=\"(.*?)\"(.*?)")
+        obj.append(listReData[0][1])
+        lf = re.findall("(.*?)alt=\"(.*?)\"(.*?)", i[2])
+        obj.append(lf[0][1])
+        list.append(obj)
+    return list
+
+
+def get_article_page_content(str_url):
+    data = get_html_data(str_url)
+    info_list = get_data_on_match(data, "div", "clearfix dirconone",
+                                  "\<li\>(.*?)href=\"(.*?)\" title=\"(.*?)\"(.*?)\<\/li\>")
+    page_info_list = []
+    for i in info_list:
+        obj = [str_url + '/' + i[1], i[2]]
+        page_info_list.append(obj)
+    return page_info_list
+
+
+def get_article_content(str_url):
+    try:
+        data = get_html_data(str_url)
+        ll = get_data_on_match(data, "div", "mainContenr", "")
+        return ll
+    except:
+        print('i get the error')
+        data = get_html_data(str_url)
+        ll = get_data_on_match(data, "div", "mainContenr", "")
+        return ll
+
+
+class CleverBookSys:
+
+    def __init__(self):
+        self.bExit = 0
+        self.eventBook = threading.Event()
+        self.eventPage = threading.Event()
+        self.lsBookInfo = ListBookInfo()
+        self.lsBookPageInfo = BookPageInfo()
+        self.thrParseBook = ThreadForParseAllBook(self, "ThreadForParseAllBook")
+        self.thrParseBookPage = ThreadForParseBookPage(self, "ThreadForParseBookPage")
+        n_count = 0
+        self.thrDownLoad = []
+        # 开十个线程用于下载，视网速而定
+        while n_count < 10:
+            thread = ThreadForDownloadTxt(self, "ThreadForDownloadTxt", n_count)
+            thread.start()
+            self.thrDownLoad.append(thread)
+            n_count += 1
+        self.thrParseBook.start()
+        self.thrParseBookPage.start()
+
+
+# 用与抓取整个网站的小说名及URL（没写完、大概写了一些）
+class ThreadForParseAllBook(threading.Thread):
+
+    def __init__(self, parent, str_thr_name):
+        threading.Thread.__init__(self)
+        self.parent = parent
+        self.str_thr_name = str_thr_name
+        # 这里只针对这个网站的解析
+        self.lsArticle = get_article_type(get_html_data("http://www.quanshuwang.com/"))
+
+    def run(self):
+        print("Thread %s is Start!!!" % self.str_thr_name)
+        for art in self.lsArticle:
+            book_info_list = get_article(art[0])
+            # 【0】：小说路径，[1]：小说名
+            for bookInfo in book_info_list:
+                self.parent.lsBookInfo.add_book_info(bookInfo[1], bookInfo[0])
+            self.parent.eventBook.set()
+
+
+# 用于抓取单本小说的所以章节名及URL
+class ThreadForParseBookPage(threading.Thread):
+
+    def __init__(self, parent, str_thr_name):
+        threading.Thread.__init__(self)
+        self.parent = parent
+        self.str_thr_name = str_thr_name
+
+    def run(self):
+        print("Thread %s is Start!!!" % self.str_thr_name)
+        while self.parent.bExit == 0:
+            n_size = self.parent.lsBookInfo.get_size()
+            print("ThreadForParseBookPage-->%d" % n_size)
+            if n_size > 0:
+                book_info = self.parent.lsBookInfo.get_head_book_info()
+                print("ThreadForParseBookPage->%s" % book_info)
+                page_info = get_article_page_content(book_info[1])
+                print("ThreadForParseBookPage2->%s" % page_info)
+                self.parent.lsBookPageInfo.add_book_page_info(book_info[0], page_info)
+                self.parent.eventPage.set()
+            else:
+                print("self.parent.eventBook.wait()")
+                self.parent.eventBook.wait()
+                if n_size <= 0:
+                    self.parent.eventBook.clear()
+                print("self.parent.eventBook.run()")
+
+
+# 用于抓取单小说的所有章节内容并生成TXT文档保存
+class ThreadForDownloadTxt(threading.Thread):
+
+    def __init__(self, parent, str_thr_name, n_thr_no):
+        threading.Thread.__init__(self)
+        self.parent = parent
+        self.strThrName = str_thr_name
+        self.nThrNO = n_thr_no
+
+    def run(self):
+        print("Thread %s%d is Start!!!" % (self.strThrName, self.nThrNO))
+        while self.parent.bExit == 0:
+            n_size = self.parent.lsBookPageInfo.get_size()
+            print("ThreadForDownloadTxt-->%d" % n_size)
+            if n_size > 0:
+                book_page_info_list = self.parent.lsBookPageInfo.get_head_book_page_info()
+                print("ThreadForDownloadTxt%d-->%s" % (self.nThrNO, book_page_info_list))
+                file_name = 'D:\\txt\\' + book_page_info_list[0] + '.txt'
+                file_object = open(file_name, 'w', encoding='utf-8')
+                for pageInfo in book_page_info_list[1]:
+                    print("ThreadForDownloadTxt%d-->%s" % (self.nThrNO, pageInfo))
+                    content = get_article_content(pageInfo[0])
+                    print(content)
+                    file_object.write(pageInfo[1])
+                    file_object.write(str(content))
+                    file_object.flush()
+                file_object.close()
+            else:
+                print("self.parent.eventPage.wait()")
+                self.parent.eventPage.wait()
+                if n_size <= 0:
+                    self.parent.eventPage.clear()
+                print("self.parent.eventPage.run()")
+
+
+cleverBook = CleverBookSys()
